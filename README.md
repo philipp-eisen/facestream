@@ -34,7 +34,7 @@ uv run modal deploy facestream.main
 
 ### Optional: TURN Server for Cellular Networks
 
-On most cellular networks you need a TURN server for WebRTC to work. You can create a TURN app on [Cloudflare](https://developers.cloudflare.com/turn-server/). To use those with this app you need to:
+On most cellular networks you need a TURN server for WebRTC to work. You can create a TURN app on [Cloudflare](https://developers.cloudflare.com/calls/turn/). To use those with this app you need to:
 
 1. Create a secret called `facestream` in modal with the following values:
 
