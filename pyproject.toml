@@ -1,0 +1,45 @@
+[project]
+name = "facestream"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    "huggingface-hub>=0.27.1",
+    "insightface==0.7.3",
+    "numpy<2",
+    "onnx==1.16.0",
+    "onnxruntime-gpu==1.16.3; sys_platform != 'darwin'",
+    "onnxruntime-silicon==1.16.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "opencv-python>=4.11.0.86",
+    "torch==2.0.1",
+    "torchvision==0.15.2",
+    "aiortc>=1.9.0",
+    "fastapi>=0.115.6",
+    "opencv-python>=4.11.0.86",
+    "uvicorn>=0.30.1",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+    "modal>=0.72.48",
+    "ruff>=0.9.3",
+    "uv>=0.5.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/facestream"]
