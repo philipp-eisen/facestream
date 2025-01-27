@@ -58,6 +58,6 @@ secrets=[
 
 ## Credits
 
-- This project was inspired by and uses the model of [Deep Live Cam](https://github.com/hacksider/Deep-Live-Cam). Go check out there project they have some extra features that I didn't implement here. Note that the model used in that project (and therefore also this one) is only for non-commercial use.
+- This project was inspired by and uses the model of [Deep Live Cam](https://github.com/hacksider/Deep-Live-Cam). Go check out their project. They have some extra features that I didn't implement here. Note that the model used in that project (and therefore also this one) is only for non-commercial use.
 
 - [Modal](https://modal.com) made this easy to build and deploy. They are generously providing free credits to host the live demo.
