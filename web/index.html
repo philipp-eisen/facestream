@@ -103,7 +103,7 @@
         text-align: center;
         transform: translate(-50%, -50%);
       }
-      .server-status::after {
+      .server-status-text::after {
         content: "";
         animation: dots 1.5s steps(4, end) infinite;
       }
@@ -273,7 +273,15 @@
       Go Back
     </button>
     <div id="serverOverlay" class="overlay"></div>
-    <div id="serverStatus" class="server-status">Waiting for server</div>
+    <div id="serverStatus" class="server-status">
+      <div class="server-status-text">Waiting for server</div>
+      <div
+        class="server-sub-text"
+        style="font-size: 14px; opacity: 0.8; margin-top: 8px"
+      >
+        This can take up to 20 seconds
+      </div>
+    </div>
     <div id="uploadContainer">
       <label class="upload-label">Select one of the preset images</label>
       <div class="image-grid">
