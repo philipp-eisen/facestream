@@ -36,7 +36,7 @@ app = modal.App(name="facestream", image=web_image)
 
 
 @app.cls(
-    gpu="A10G",
+    gpu="T4",
     container_idle_timeout=60,
     cpu=16,
     timeout=600,
@@ -49,12 +49,12 @@ app = modal.App(name="facestream", image=web_image)
     # - which is required for most cellular networks.
     # (See README.md for more information)
     #
-    # secrets=[
-    #     modal.Secret.from_name(
-    #         "facestream",
-    #         required_keys=[SECRET_KEY_TURN_TOKEN_ID, SECRET_KEY_TURN_API_TOKEN],
-    #     )
-    # ],
+    secrets=[
+        modal.Secret.from_name(
+            "facestream",
+            required_keys=[SECRET_KEY_TURN_TOKEN_ID, SECRET_KEY_TURN_API_TOKEN],
+        )
+    ],
     allow_concurrent_inputs=4,
 )
 class Main:
