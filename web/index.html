@@ -588,6 +588,12 @@
               );
             }
           };
+          pc.onconnectionstatechange = (event) => {
+            if (pc.connectionState === "disconnected") {
+              alert("Session ended. Going back...");
+              window.location.reload();
+            }
+          };
 
           // Create offer
           const offer = await pc.createOffer();

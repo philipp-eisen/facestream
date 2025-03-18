@@ -39,7 +39,7 @@ app = modal.App(name="facestream", image=web_image)
     gpu="T4",
     container_idle_timeout=60,
     cpu=16,
-    timeout=600,
+    timeout=120,
     volumes={
         MODEL_CACHE_DIR: modal.Volume.from_name(
             "facestream-model-cache", create_if_missing=True
@@ -183,12 +183,14 @@ class Main:
                         if source_face is None:
                             raise Exception("Source face needs to be uploaded first")
 
-                        candidate = Candidate.from_sdp(data["candidate"])
-                        rtc_ice_candidate = candidate_from_aioice(candidate)
-                        rtc_ice_candidate.sdpMid = data["sdpMid"]
-                        rtc_ice_candidate.sdpMLineIndex = data["sdpMLineIndex"]
+                        candidate_data = data["candidate"]
+                        if candidate_data:
+                            candidate = Candidate.from_sdp(candidate_data)
+                            rtc_ice_candidate = candidate_from_aioice(candidate)
+                            rtc_ice_candidate.sdpMid = data["sdpMid"]
+                            rtc_ice_candidate.sdpMLineIndex = data["sdpMLineIndex"]
 
-                        await pc.addIceCandidate(rtc_ice_candidate)
+                            await pc.addIceCandidate(rtc_ice_candidate)
 
                     elif data.get("type") == "ping":
                         await websocket.send_json({"type": "pong"})
