@@ -542,7 +542,9 @@
           };
         } catch (error) {
           console.error("Error:", error);
-          alert("Error connecting to server: " + error.message);
+          if (confirm("Session ended. Going back...")) {
+            window.location.reload();
+          }
         }
       }
 
@@ -590,8 +592,9 @@
           };
           pc.onconnectionstatechange = (event) => {
             if (pc.connectionState === "disconnected") {
-              alert("Session ended. Going back...");
-              window.location.reload();
+              if (confirm("Session ended. Going back...")) {
+                window.location.reload();
+              }
             }
           };
 
