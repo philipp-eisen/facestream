@@ -199,10 +199,14 @@ class Main:
                 logger.info("WebSocket disconnected")
                 await websocket.close(code=1000)
                 return
+            except modal.exception.FunctionTimeoutError:
+                logger.info("Function timeout. Closing websocket.")
+                await websocket.close(code=1000)
+                return
 
             except Exception as e:
                 logger.exception("Error in websocket")
-                await websocket.close(code=1011)
+                await websocket.close(code=1000)
                 raise e
             finally:
                 if pc is not None:
