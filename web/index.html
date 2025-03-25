@@ -511,7 +511,15 @@
           ws.onerror = (error) => {
             // just reload the page if there's an error -- poor man's error handling
             console.error("WebSocket error:", error, "Reloading...");
-            window.location.reload();
+            if (confirm("Error in connection. Going back...")) {
+              window.location.reload();
+            }
+          };
+
+          ws.onclose = () => {
+            if (confirm("Session ended. Going back...")) {
+              window.location.reload();
+            }
           };
 
           ws.onmessage = async (message) => {
