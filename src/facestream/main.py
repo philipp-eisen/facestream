@@ -1,10 +1,10 @@
+import asyncio
 import base64
 import json
 import logging
 import os
 from functools import partial
 
-import aiohttp
 import cv2
 import fastapi
 import modal
@@ -14,12 +14,13 @@ from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.rtcicetransport import candidate_from_aioice
 from av.video.frame import VideoFrame
 
+from facestream import config, turn
 from facestream.constants import (
     MODEL_CACHE_DIR,
     SECRET_KEY_TURN_API_TOKEN,
     SECRET_KEY_TURN_TOKEN_ID,
 )
-from facestream.faceswap import FaceSwap
+from facestream.faceswap import FaceSwap, FaceTracker
 from facestream.track import ProcessFrameTrack
 
 logger = logging.getLogger(__name__)
@@ -35,38 +36,64 @@ web_image = (
 app = modal.App(name="facestream", image=web_image)
 
 
+def turn_secrets() -> list[modal.Secret]:
+    """The Cloudflare TURN secret, when TURN is switched on.
+
+    Naming a Modal secret that doesn't exist fails the deploy, so this is opt-in
+    through FACESTREAM_TURN rather than something you uncomment in the source.
+    """
+    if not config.TURN_ENABLED:
+        return []
+
+    logger.info("Cloudflare TURN enabled, expecting the 'facestream' secret")
+    return [
+        modal.Secret.from_name(
+            "facestream",
+            required_keys=[SECRET_KEY_TURN_TOKEN_ID, SECRET_KEY_TURN_API_TOKEN],
+        )
+    ]
+
+
+# All of these are tunable via FACESTREAM_* environment variables at deploy
+# time -- see facestream/config.py and the README.
 @app.cls(
-    gpu="T4",
-    scaledown_window=60,
-    cpu=16,
-    timeout=120,
+    gpu=config.GPU,
+    scaledown_window=config.SCALEDOWN_WINDOW,
+    cpu=config.CPU,
+    timeout=config.TIMEOUT,
+    min_containers=config.MIN_CONTAINERS,
+    buffer_containers=config.BUFFER_CONTAINERS,
+    max_containers=config.MAX_CONTAINERS,
+    region=config.REGION,
+    # Forward the runtime knobs so the values set on the deploying machine are
+    # the ones the container actually reads.
+    env=config.runtime_env(),
     volumes={
         MODEL_CACHE_DIR: modal.Volume.from_name(
             "facestream-model-cache", create_if_missing=True
         )
     },
-    # This secret is only required if you want to use a Cloudflare TURN server
-    # - which is required for most cellular networks.
-    # (See README.md for more information)
-    #
-    # secrets=[
-    #     modal.Secret.from_name(
-    #         "facestream",
-    #         required_keys=[SECRET_KEY_TURN_TOKEN_ID, SECRET_KEY_TURN_API_TOKEN],
-    #     )
-    # ],
+    # Empty unless FACESTREAM_TURN=1, which needs a Cloudflare TURN server --
+    # required for most cellular networks. (See README.md for more information)
+    secrets=turn_secrets(),
 )
-@modal.concurrent(max_inputs=4)
+@modal.concurrent(max_inputs=config.MAX_CONCURRENT_INPUTS)
 class Main:
     @modal.enter()
     def load(self):
+        logger.info("Starting with config: %s", config.describe())
         self.faceswap = FaceSwap()
+        # Pay for cuDNN algorithm selection now rather than during the first
+        # seconds of somebody's stream.
+        self.faceswap.warmup()
         self.turn_token_id = os.environ.get(SECRET_KEY_TURN_TOKEN_ID)
         self.turn_api_token = os.environ.get(SECRET_KEY_TURN_API_TOKEN)
 
-    async def process_frame(self, frame: VideoFrame, source_face: dict):
+    async def process_frame(
+        self, frame: VideoFrame, source_face: dict, tracker: FaceTracker
+    ):
         out = await self.faceswap.swap_face(
-            frame.to_ndarray(format="bgr24"), source_face
+            frame.to_ndarray(format="bgr24"), source_face, tracker
         )
 
         new_frame = VideoFrame.from_ndarray(out, format="bgr24")  # pyright: ignore[reportArgumentType]
@@ -75,12 +102,18 @@ class Main:
         return new_frame
 
     def get_on_track_listener(self, pc: RTCPeerConnection, source_face):
+        # Detection state is per stream, not per container.
+        tracker = FaceTracker()
+
         def on_track(track: MediaStreamTrack):
             logger.info("Track received: %s", track.kind)
             if track.kind == "video":
                 logger.info("Adding video track")
                 new_track = ProcessFrameTrack(
-                    track, partial(self.process_frame, source_face=source_face)
+                    track,
+                    partial(
+                        self.process_frame, source_face=source_face, tracker=tracker
+                    ),
                 )
                 pc.addTrack(new_track)
             elif track.kind == "audio":
@@ -95,28 +128,10 @@ class Main:
 
         return on_track
 
-    async def _get_cloudflare_ice_servers(self):
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"https://rtc.live.cloudflare.com/v1/turn/keys/{self.turn_token_id}/credentials/generate",
-                headers={"Authorization": f"Bearer {self.turn_api_token}"},
-                json={"ttl": 86400},
-            ) as response:
-                data = await response.json()
-                return [data["iceServers"]]
-
     async def get_ice_servers(self):
-        # If we have Cloudflare TURN credentials, use them
-        # Otherwise, use Google STUN.
-
-        # NOTE: without a TURN server the stream will most likely not
-        # work on cellular networks.
-        if self.turn_api_token and self.turn_token_id:
-            logger.info("Using Cloudflare TURN servers")
-            return await self._get_cloudflare_ice_servers()
-        else:
-            logger.info("Using Google STUN")
-            return [{"urls": "stun:stun.l.google.com:19302"}]
+        # Without a TURN server the stream will most likely not work on
+        # cellular networks. See facestream/turn.py.
+        return await turn.get_ice_servers(self.turn_token_id, self.turn_api_token)
 
     @modal.asgi_app()
     def web(self):
@@ -127,6 +142,10 @@ class Main:
         web_app.add_route(
             "/favicon.ico", lambda _: fastapi.responses.FileResponse("/web/favicon.ico")
         )
+
+        @web_app.get("/healthz")
+        def healthz():
+            return {"status": "ok", "config": config.describe()}
 
         @web_app.websocket("/ws")
         async def ws(websocket: fastapi.WebSocket):
@@ -139,9 +158,25 @@ class Main:
 
                 while True:
                     try:
-                        data = json.loads(await websocket.receive_text())
+                        # The client heartbeats every 15s. Dropping a peer that
+                        # has gone quiet is what makes a long session timeout
+                        # safe: a browser tab that dies without closing its
+                        # socket can't hold a GPU container open for an hour.
+                        raw = await asyncio.wait_for(
+                            websocket.receive_text(), timeout=config.WS_IDLE_TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        logger.info(
+                            "No message for %ss. Closing websocket.",
+                            config.WS_IDLE_TIMEOUT,
+                        )
+                        await websocket.close(code=1000)
+                        return
+
+                    try:
+                        data = json.loads(raw)
                     except json.JSONDecodeError:
-                        logger.error("Received invalid JSON: %s", data)
+                        logger.error("Received invalid JSON: %s", raw)
                         continue
 
                     if data.get("type") == "upload_image":
@@ -152,6 +187,16 @@ class Main:
                         nparr = np.frombuffer(image_bytes, np.uint8)
                         source_face = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                         source_face = await self.faceswap.get_one_face(source_face)
+
+                        if source_face is None:
+                            logger.info("No face found in the uploaded image")
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "message": "No face found in that image. Try another one.",
+                                }
+                            )
+                            continue
 
                         logger.info("Got source face")
                         pc.remove_all_listeners()

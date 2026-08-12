@@ -302,6 +302,69 @@
           --grid-chrome-height: clamp(170px, 30dvh, 220px);
         }
       }
+
+      /* ---- OBS / clean mode (?obs=1) --------------------------------- */
+      /* Nothing but the swapped video, so an OBS browser source or a window
+         capture picks up a full-bleed frame with no chrome in it. */
+      body.obs-mode {
+        background: #000;
+        overflow: hidden;
+      }
+      body.obs-mode #titleContainer,
+      body.obs-mode #uploadContainer,
+      body.obs-mode #localVideo,
+      body.obs-mode #goBackButton,
+      body.obs-mode .social-links,
+      body.obs-mode #serverOverlay {
+        display: none !important;
+      }
+      body.obs-mode #remoteVideo {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+        object-fit: var(--video-fit, cover);
+      }
+      body.obs-mode .server-status {
+        font-size: 18px;
+        opacity: 0.85;
+      }
+      body.no-mirror #remoteVideo,
+      body.no-mirror #localVideo {
+        transform: none;
+      }
+      #statsOverlay {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        z-index: 5;
+        padding: 6px 9px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #5f5;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre;
+      }
+      #statsOverlay.hidden {
+        display: none;
+      }
+      #errorBanner {
+        position: fixed;
+        bottom: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 5;
+        max-width: 90vw;
+        padding: 10px 14px;
+        border-radius: 6px;
+        background: rgba(178, 34, 34, 0.92);
+        color: white;
+        font-size: 14px;
+        text-align: center;
+      }
+      #errorBanner.hidden {
+        display: none;
+      }
     </style>
   </head>
   <body>
@@ -348,36 +411,42 @@
           class="preset-image disabled"
           onclick="selectPresetImage(this.src)"
           alt="A picture of Dwayne Johnson"
+          data-preset="rock"
         />
         <img
           src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/4b/Michelle_Obama_2013_official_portrait.jpg/960px-Michelle_Obama_2013_official_portrait.jpg"
           class="preset-image disabled"
           onclick="selectPresetImage(this.src)"
           alt="A picture of Michelle Obama"
+          data-preset="michelle"
         />
         <img
           src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/01/Adam_Scott_-_Severance.jpg/960px-Adam_Scott_-_Severance.jpg"
           class="preset-image disabled"
           onclick="selectPresetImage(this.src)"
           alt="A picture of Adam Scott"
+          data-preset="adam"
         />
         <img
           src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/Selena_Gomez_UNICEF_3%2C_2012_%28headshot%29.jpg/960px-Selena_Gomez_UNICEF_3%2C_2012_%28headshot%29.jpg"
           class="preset-image disabled"
           onclick="selectPresetImage(this.src)"
           alt="A picture of Selena Gomez"
+          data-preset="selena"
         />
         <img
           src="https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/LeBron_James_%2851959977144%29_%28cropped2%29.jpg/960px-LeBron_James_%2851959977144%29_%28cropped2%29.jpg"
           class="preset-image disabled"
           onclick="selectPresetImage(this.src)"
           alt="A picture of LeBron James"
+          data-preset="lebron"
         />
         <img
           src="https://upload.wikimedia.org/wikipedia/commons/thumb/f/ff/Lucy_Liu_at_the_2024_Toronto_International_Film_Festival_2.jpg/960px-Lucy_Liu_at_the_2024_Toronto_International_Film_Festival_2.jpg"
           class="preset-image disabled"
           onclick="selectPresetImage(this.src)"
           alt="A picture of Lucy Liu"
+          data-preset="lucy"
         />
       </div>
       <p class="preset-sources">
@@ -405,7 +474,11 @@
       </button>
     </div>
     <video id="localVideo" autoplay muted playsinline></video>
-    <video id="remoteVideo" autoplay playsinline></video>
+    <!-- muted: no audio is ever sent back, and it keeps autoplay working in
+         OBS's embedded browser, which has no user to click through a prompt. -->
+    <video id="remoteVideo" autoplay muted playsinline></video>
+    <div id="statsOverlay" class="hidden"></div>
+    <div id="errorBanner" class="hidden"></div>
     <div class="social-links">
       <a href="https://x.com/phileisn" target="_blank" class="social-link">
         <svg class="social-icon" viewBox="0 0 24 24" fill="currentColor">
@@ -458,23 +531,332 @@
       const serverStatus = document.getElementById("serverStatus");
       const serverOverlay = document.getElementById("serverOverlay");
       const titleContainer = document.getElementById("titleContainer");
+      const statsOverlay = document.getElementById("statsOverlay");
+      const errorBanner = document.getElementById("errorBanner");
+
+      /* -----------------------------------------------------------------
+         URL options
+
+           obs=1             chromeless full-bleed output for OBS, and
+                             reconnects on its own instead of asking
+           face=<key|url>    start immediately with this face, no clicking
+           mirror=0          don't mirror the video
+           fit=contain       letterbox instead of filling the frame
+           res=480|540|720|1080   resolution requested from the camera
+           fps=<n>           frame rate requested from the camera
+           camera=<text>     pick a webcam by label substring or deviceId
+           stats=1           show a live fps / resolution / rtt readout
+           server=<host>     talk to a different FaceStream deployment
+           retries=<n>       reconnect attempts before giving up (obs mode)
+
+         e.g. .../?obs=1&face=lucy&res=720&fps=30
+         ----------------------------------------------------------------- */
+      const params = new URLSearchParams(window.location.search);
+
+      function flag(name, fallback = false) {
+        const raw = params.get(name);
+        if (raw === null) return fallback;
+        if (raw === "") return true;
+        return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
+      }
+
+      const OBS_MODE = flag("obs") || flag("clean");
+      const MIRROR = flag("mirror", true);
+      const SHOW_STATS = flag("stats");
+      const MAX_RECONNECTS = parseInt(params.get("retries") || "20", 10);
+      const HEARTBEAT_MS = 15000;
+
+      const RESOLUTIONS = {
+        480: [640, 480],
+        540: [960, 540],
+        720: [1280, 720],
+        1080: [1920, 1080],
+      };
+      const [CAPTURE_WIDTH, CAPTURE_HEIGHT] =
+        RESOLUTIONS[params.get("res")] || RESOLUTIONS[720];
+      const CAPTURE_FPS = parseInt(params.get("fps") || "30", 10);
+
+      // Left alone, Chrome opens at roughly 300 kbps and creeps upwards, so the
+      // first half-minute of a stream goes out at 640x360 even on a fast link.
+      // These hints tell it to start where we expect to end up.
+      const MAX_KBPS = parseInt(params.get("bitrate") || "3000", 10);
+      const START_KBPS = Math.min(2500, MAX_KBPS);
+      const MIN_KBPS = Math.min(800, MAX_KBPS);
+
+      const PRESETS = {};
+      presetImages.forEach((img) => {
+        if (img.dataset.preset) PRESETS[img.dataset.preset] = img.src;
+      });
 
       let pc;
       let ws;
+      let localStream;
+      let serverReady = false;
+      let connectionLost = false;
+      let reconnectAttempts = 0;
+      let heartbeatTimer = null;
+      let statsTimer = null;
 
       // Initially disable upload button
       uploadButton.disabled = true;
 
-      async function selectPresetImage(imageUrl) {
-        if (uploadButton.disabled) return;
+      let stickyError = false;
 
+      // Sticky errors describe something the user has to fix (a bad face=
+      // value, a camera that won't open). They survive a reconnect, unlike the
+      // transient "reconnecting..." notices.
+      function showError(message, sticky = false) {
+        console.error(message);
+        errorBanner.textContent = message;
+        errorBanner.classList.remove("hidden");
+        stickyError = sticky;
+      }
+
+      function clearError(force = false) {
+        if (stickyError && !force) return;
+        stickyError = false;
+        errorBanner.classList.add("hidden");
+      }
+
+      function resolveFaceUrl(value) {
+        if (!value) return null;
+        if (/^https?:\/\//i.test(value)) return value;
+        return PRESETS[value.toLowerCase()] || null;
+      }
+
+      const requestedFace = params.get("face");
+      const autoFaceUrl = resolveFaceUrl(requestedFace);
+
+      function applyMode() {
+        if (!MIRROR) document.body.classList.add("no-mirror");
+        if (SHOW_STATS) statsOverlay.classList.remove("hidden");
+        if (!OBS_MODE) return;
+
+        document.body.classList.add("obs-mode");
+        document.body.style.setProperty(
+          "--video-fit",
+          params.get("fit") === "contain" ? "contain" : "cover"
+        );
+
+        if (requestedFace && !autoFaceUrl) {
+          showError(
+            `Unknown face "${requestedFace}". Use an image URL or one of: ` +
+              Object.keys(PRESETS).join(", "),
+            true
+          );
+        } else if (!requestedFace) {
+          showError(
+            "OBS mode needs a face: add &face=" +
+              Object.keys(PRESETS)[0] +
+              " (or &face=<image url>) to the URL.",
+            true
+          );
+        }
+      }
+
+      function backendUrl() {
+        const override = params.get("server");
+        if (override) {
+          const withScheme = /^wss?:\/\//i.test(override)
+            ? override
+            : `wss://${override}`;
+          return withScheme.replace(/\/+$/, "") + "/ws";
+        }
+        // Same origin by default. The page is normally served by the backend
+        // itself, so this is right for a plain *.modal.run deployment, for a
+        // custom domain, and behind a Cloudflare proxy alike. Matching on
+        // "modal.run" instead would send anyone on their own domain to the
+        // upstream demo's backend. Following the page's protocol keeps a local
+        // http deployment working.
+        if (/^https?:$/.test(window.location.protocol)) {
+          const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+          return `${scheme}://${window.location.host}/ws`;
+        }
+        // Opened straight off disk: nothing to be same-origin with.
+        return "wss://philipp-eisen--facestream-main-web.modal.run/ws";
+      }
+
+      /**
+       * Add bitrate hints to the answer's video section.
+       *
+       * These belong in the remote description: they describe what the far end
+       * is willing to receive, which is what our encoder reads when deciding
+       * where to start. x-google-* is Chrome specific and ignored elsewhere.
+       */
+      function tuneVideoBitrate(sdp) {
+        const lines = sdp.split(/\r\n|\n/);
+        const videoIndex = lines.findIndex((line) => line.startsWith("m=video"));
+        if (videoIndex === -1) return sdp;
+
+        // The first payload type that is a real codec rather than
+        // retransmission or forward error correction.
+        const payloadTypes = lines[videoIndex].split(" ").slice(3);
+        const primary = payloadTypes.find((pt) => {
+          const rtpmap = lines.find((line) =>
+            line.startsWith(`a=rtpmap:${pt} `)
+          );
+          return rtpmap && !/\b(rtx|red|ulpfec|flexfec)\b/i.test(rtpmap);
+        });
+        if (!primary) return sdp;
+
+        const hint =
+          `x-google-start-bitrate=${START_KBPS};` +
+          `x-google-min-bitrate=${MIN_KBPS};` +
+          `x-google-max-bitrate=${MAX_KBPS}`;
+
+        const out = [];
+        let inVideo = false;
+        let videoStart = -1;
+        let wroteBandwidth = false;
+        let wroteHint = false;
+
+        for (const line of lines) {
+          if (line.startsWith("m=")) {
+            inVideo = line.startsWith("m=video");
+            if (inVideo) videoStart = out.length;
+          }
+
+          if (inVideo) {
+            // b= must sit after c= and before the a= lines.
+            if (line.startsWith("b=AS:")) continue;
+            if (!wroteBandwidth && line.startsWith("a=")) {
+              out.push(`b=AS:${MAX_KBPS}`);
+              wroteBandwidth = true;
+            }
+            if (line.startsWith(`a=fmtp:${primary} `)) {
+              out.push(`${line};${hint}`);
+              wroteHint = true;
+              continue;
+            }
+          }
+          out.push(line);
+        }
+
+        // VP8 usually arrives with no fmtp line at all, so add one.
+        if (!wroteHint && videoStart !== -1) {
+          const rtpmapIndex = out.findIndex(
+            (line, index) =>
+              index >= videoStart && line.startsWith(`a=rtpmap:${primary} `)
+          );
+          if (rtpmapIndex !== -1) {
+            out.splice(rtpmapIndex + 1, 0, `a=fmtp:${primary} ${hint}`);
+          }
+        }
+
+        return out.join("\r\n");
+      }
+
+      async function tuneVideoSender() {
+        const sender = pc
+          .getSenders()
+          .find((s) => s.track && s.track.kind === "video");
+        if (!sender) return;
         try {
+          const parameters = sender.getParameters();
+          if (!parameters.encodings || !parameters.encodings.length) {
+            parameters.encodings = [{}];
+          }
+          parameters.encodings[0].maxBitrate = MAX_KBPS * 1000;
+          parameters.encodings[0].scaleResolutionDownBy = 1;
+          const degradation = params.get("degradation");
+          if (degradation) {
+            parameters.degradationPreference = degradation;
+          } else if (OBS_MODE) {
+            // Detail on the swapped face matters more on a stream than the
+            // last few frames per second do.
+            parameters.degradationPreference = "maintain-resolution";
+          }
+          await sender.setParameters(parameters);
+        } catch (error) {
+          console.warn("Could not tune the video sender:", error);
+        }
+      }
+
+      function teardown() {
+        serverReady = false;
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        if (statsTimer) {
+          clearInterval(statsTimer);
+          statsTimer = null;
+        }
+        if (ws) {
+          ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+          try {
+            ws.close(1000);
+          } catch (error) {
+            /* already closing */
+          }
+          ws = null;
+        }
+        if (pc) {
+          pc.onicecandidate = pc.ontrack = pc.onconnectionstatechange = null;
+          try {
+            pc.close();
+          } catch (error) {
+            /* already closed */
+          }
+          pc = null;
+        }
+        if (localStream) {
+          localStream.getTracks().forEach((track) => track.stop());
+          localStream = null;
+        }
+        // remoteVideo.srcObject is left alone on purpose: holding the last
+        // frame means a short reconnect doesn't punch a black hole in the
+        // stream. A reconnect that never succeeds says so in the banner.
+      }
+
+      function handleDisconnect(prompt, detail) {
+        if (connectionLost) return;
+        connectionLost = true;
+        console.warn("Disconnected:", detail || prompt);
+        teardown();
+
+        if (!OBS_MODE) {
+          // Unchanged: outside OBS mode every reconnect takes a deliberate
+          // user action, so a forgotten tab can't keep waking up GPUs.
+          if (confirm(prompt)) window.location.reload();
+          return;
+        }
+
+        // Nothing in OBS can click a dialog, so reconnect on a backoff, but
+        // give up eventually rather than hammering the backend forever.
+        if (reconnectAttempts >= MAX_RECONNECTS) {
+          showError(
+            `Disconnected: ${detail || prompt}. Gave up after ` +
+              `${reconnectAttempts} attempts -- refresh the browser source.`
+          );
+          return;
+        }
+
+        const delay = Math.min(1000 * 2 ** reconnectAttempts, 15000);
+        reconnectAttempts += 1;
+        showError(
+          `Reconnecting in ${Math.round(delay / 1000)}s ` +
+            `(attempt ${reconnectAttempts}/${MAX_RECONNECTS})`
+        );
+        serverStatus.classList.remove("hidden");
+        setTimeout(start, delay);
+      }
+
+      async function sendFace(imageUrl) {
+        try {
+          clearError(true);
           uploadButton.disabled = true;
           presetImages.forEach((img) => img.classList.add("disabled"));
+
           const response = await fetch(imageUrl);
+          if (!response.ok) {
+            throw new Error(`could not fetch image (${response.status})`);
+          }
           const blob = await response.blob();
           const base64Image = await resizeImage(
-            new File([blob], "preset.jpg", { type: "image/jpeg" })
+            new File([blob], "face.jpg", {
+              type: blob.type || "image/jpeg",
+            })
           );
 
           ws.send(
@@ -484,10 +866,15 @@
             })
           );
         } catch (error) {
-          console.error("Error processing preset image:", error);
-          alert("Error processing preset image: " + error.message);
+          showError("Error processing image: " + error.message, true);
           uploadButton.disabled = false;
+          presetImages.forEach((img) => img.classList.remove("disabled"));
         }
+      }
+
+      async function selectPresetImage(imageUrl) {
+        if (uploadButton.disabled) return;
+        await sendFace(imageUrl);
       }
 
       function triggerFileInput() {
@@ -516,15 +903,18 @@
           file = await convertHeicToJpeg(file);
         }
 
-        if (!file.type.match(/image\/(jpeg|png|heic|heif)/)) {
-          alert("Please upload a JPEG, PNG, or HEIC image");
-          throw new Error("Unsupported file format");
+        // An empty type is left alone: a face= URL may be served without a
+        // usable content type, and the decoder can still have a go at it.
+        if (file.type && !file.type.match(/image\/(jpeg|png|webp|heic|heif)/)) {
+          throw new Error(`unsupported image format: ${file.type}`);
         }
 
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
           const reader = new FileReader();
+          reader.onerror = () => reject(new Error("could not read the image"));
           reader.onload = (e) => {
             const img = new Image();
+            img.onerror = () => reject(new Error("could not decode the image"));
             img.onload = () => {
               const canvas = document.createElement("canvas");
 
@@ -556,53 +946,64 @@
           uploadButton.disabled = true;
           uploadButton.textContent = "Uploading...";
 
-          const file = e.target.files[0];
-          const base64Image = await resizeImage(file);
-
-          ws.send(
-            JSON.stringify({
-              type: "upload_image",
-              image: base64Image,
-            })
-          );
+          try {
+            const base64Image = await resizeImage(e.target.files[0]);
+            ws.send(
+              JSON.stringify({
+                type: "upload_image",
+                image: base64Image,
+              })
+            );
+          } catch (error) {
+            showError("Error processing image: " + error.message, true);
+            uploadButton.disabled = false;
+            uploadButton.textContent = "Select Image";
+          }
         }
       });
 
       async function start() {
+        connectionLost = false;
         try {
-          const hostname = window.location.hostname.includes("modal.run")
-            ? window.location.hostname
-            : "philipp-eisen--facestream-main-web.modal.run";
-
-          ws = new WebSocket(`wss://${hostname}/ws`);
+          ws = new WebSocket(backendUrl());
 
           ws.onopen = () => {
             console.log("WebSocket connected");
             ws.send(JSON.stringify({ type: "ping" }));
+            // The server hangs up on sockets that go quiet. That heartbeat is
+            // what lets a session last a whole stream rather than being capped
+            // by a short timeout, without leaking idle GPU containers.
+            heartbeatTimer = setInterval(() => {
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "ping" }));
+              }
+            }, HEARTBEAT_MS);
           };
 
           ws.onerror = (error) => {
-            // just reload the page if there's an error -- poor man's error handling
-            console.error("WebSocket error:", error, "Reloading...");
-            if (confirm("Error in connection. Going back...")) {
-              window.location.reload();
-            }
+            handleDisconnect("Error in connection. Going back...", error.type);
           };
 
           ws.onclose = () => {
-            if (confirm("Session ended. Going back...")) {
-              window.location.reload();
-            }
+            handleDisconnect("Session ended. Going back...", "socket closed");
           };
 
           ws.onmessage = async (message) => {
             const data = JSON.parse(message.data);
             if (data.type === "pong") {
-              // Server is ready, enable upload and preset images
+              // Heartbeat replies land here too; only the first one means
+              // "the server just came up".
+              if (serverReady) return;
+              serverReady = true;
+              reconnectAttempts = 0;
+              clearError();
+
               uploadButton.disabled = false;
               serverStatus.classList.add("hidden");
               serverOverlay.classList.add("hidden");
               presetImages.forEach((img) => img.classList.remove("disabled"));
+
+              if (autoFaceUrl) await sendFace(autoFaceUrl);
             } else if (data.type === "readyForStream") {
               // Image was processed successfully, now start the video stream
               uploadContainer.classList.add("hidden");
@@ -610,7 +1011,13 @@
               goBackButton.classList.remove("hidden");
               await startVideoStream(data.iceServers);
             } else if (data.type === "answer") {
-              await pc.setRemoteDescription(new RTCSessionDescription(data));
+              await pc.setRemoteDescription(
+                new RTCSessionDescription({
+                  type: "answer",
+                  sdp: tuneVideoBitrate(data.sdp),
+                })
+              );
+              await tuneVideoSender();
             } else if (data.type === "candidate") {
               await pc.addIceCandidate(
                 new RTCIceCandidate({
@@ -619,31 +1026,108 @@
                   sdpMLineIndex: data.sdpMLineIndex,
                 })
               );
+            } else if (data.type === "error") {
+              showError(data.message || "Something went wrong", true);
+              uploadButton.disabled = false;
+              uploadButton.textContent = "Select Image";
+              presetImages.forEach((img) => img.classList.remove("disabled"));
             }
           };
         } catch (error) {
-          console.error("Error:", error);
-          if (confirm("Session ended. Going back...")) {
-            window.location.reload();
+          handleDisconnect("Session ended. Going back...", error.message);
+        }
+      }
+
+      async function getCameraStream() {
+        const constraints = {
+          video: {
+            width: { ideal: CAPTURE_WIDTH },
+            height: { ideal: CAPTURE_HEIGHT },
+            frameRate: { ideal: CAPTURE_FPS },
+          },
+        };
+
+        const wanted = params.get("camera");
+        if (wanted) {
+          let cameras = (await navigator.mediaDevices.enumerateDevices()).filter(
+            (device) => device.kind === "videoinput"
+          );
+          // Labels are only exposed once camera permission has been granted.
+          if (!cameras.some((camera) => camera.label)) {
+            const probe = await navigator.mediaDevices.getUserMedia({
+              video: true,
+            });
+            probe.getTracks().forEach((track) => track.stop());
+            cameras = (await navigator.mediaDevices.enumerateDevices()).filter(
+              (device) => device.kind === "videoinput"
+            );
+          }
+
+          const match =
+            cameras.find((camera) => camera.deviceId === wanted) ||
+            cameras.find((camera) =>
+              camera.label.toLowerCase().includes(wanted.toLowerCase())
+            );
+
+          if (match) {
+            constraints.video.deviceId = { exact: match.deviceId };
+          } else {
+            showError(
+              `No camera matching "${wanted}". Available: ` +
+                (cameras.map((camera) => camera.label).join(", ") || "none"),
+              true
+            );
           }
         }
+
+        return navigator.mediaDevices.getUserMedia(constraints);
+      }
+
+      function startStats() {
+        if (!SHOW_STATS || statsTimer) return;
+        statsTimer = setInterval(async () => {
+          if (!pc) return;
+          const report = await pc.getStats();
+          let size = "-";
+          let fps = "-";
+          let rtt = "-";
+          let lost = "-";
+          report.forEach((entry) => {
+            if (entry.type === "inbound-rtp" && entry.kind === "video") {
+              if (entry.frameWidth) {
+                size = `${entry.frameWidth}x${entry.frameHeight}`;
+              }
+              if (entry.framesPerSecond != null) {
+                fps = entry.framesPerSecond.toFixed(0);
+              }
+              if (entry.packetsLost != null) lost = entry.packetsLost;
+            }
+            if (
+              entry.type === "candidate-pair" &&
+              entry.nominated &&
+              entry.currentRoundTripTime != null
+            ) {
+              rtt = (entry.currentRoundTripTime * 1000).toFixed(0);
+            }
+          });
+          statsOverlay.textContent =
+            `${size}  ${fps} fps\n` + `rtt ${rtt} ms  lost ${lost}`;
+        }, 1000);
       }
 
       async function startVideoStream(iceServers) {
         try {
           // Feature detection
           if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error("MediaDevices API not supported in this browser");
+            throw new Error(
+              "MediaDevices API not supported here. In OBS, launch with " +
+                "--enable-media-stream --use-fake-ui-for-media-stream."
+            );
           }
 
           // Get local video stream
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              width: { min: 640, ideal: 1280, max: 1920 },
-              height: { min: 480, ideal: 720, max: 1080 },
-            },
-          });
-          localVideo.srcObject = stream;
+          localStream = await getCameraStream();
+          localVideo.srcObject = localStream;
 
           // Create peer connection
           pc = new RTCPeerConnection({
@@ -651,11 +1135,16 @@
           });
 
           // Add local stream to connection
-          stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+          localStream
+            .getTracks()
+            .forEach((track) => pc.addTrack(track, localStream));
 
           // Handle remote stream
           pc.ontrack = (event) => {
             remoteVideo.srcObject = event.streams[0];
+            // CEF won't start playback off the back of a user gesture it never
+            // sees, so ask explicitly.
+            remoteVideo.play().catch(() => {});
           };
 
           // ICE candidate handling
@@ -671,11 +1160,15 @@
               );
             }
           };
-          pc.onconnectionstatechange = (event) => {
-            if (pc.connectionState === "disconnected") {
-              if (confirm("Session ended. Going back...")) {
-                window.location.reload();
-              }
+          pc.onconnectionstatechange = () => {
+            if (
+              pc.connectionState === "disconnected" ||
+              pc.connectionState === "failed"
+            ) {
+              handleDisconnect(
+                "Session ended. Going back...",
+                `peer connection ${pc.connectionState}`
+              );
             }
           };
 
@@ -689,12 +1182,14 @@
               sdp: pc.localDescription.sdp,
             })
           );
+
+          startStats();
         } catch (error) {
-          console.error("Error:", error);
-          alert("Error accessing camera: " + error.message);
+          showError("Error accessing camera: " + error.message, true);
         }
       }
 
+      applyMode();
       start();
     </script>
   </body>

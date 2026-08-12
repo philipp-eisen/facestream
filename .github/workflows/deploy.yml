@@ -1,0 +1,145 @@
+name: Deploy
+
+# Deploys to Modal from CI, so nothing has to be run from a laptop.
+#
+# Required repository secrets:
+#   MODAL_TOKEN_ID, MODAL_TOKEN_SECRET   from `modal token new` (see README)
+#   TURN_TOKEN_ID, TURN_API_TOKEN        only if FACESTREAM_TURN is "1"
+#
+# Optional repository variables (all have defaults):
+#   FACESTREAM_GPU, FACESTREAM_REGION, FACESTREAM_MIN_CONTAINERS,
+#   FACESTREAM_MAX_CONTAINERS, FACESTREAM_TIMEOUT, FACESTREAM_TURN,
+#   FACESTREAM_MAX_CONCURRENT_INPUTS, MODAL_ENVIRONMENT, FACESTREAM_URL
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "web/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  # Never let two deploys race. Queue instead of cancelling: a half-finished
+  # deploy that gets cancelled is worse than a slightly stale one.
+  group: deploy-modal
+  cancel-in-progress: false
+
+env:
+  NO_ALBUMENTATIONS_UPDATE: "1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - run: uv run ruff check src tests
+      - run: uv run pytest -m "not browser" -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    # Add required reviewers to this environment in repo settings if you want
+    # deploys to be approved rather than automatic.
+    environment: production
+
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT }}
+
+      # Read at deploy time and baked into the Modal app. See
+      # src/facestream/config.py for the full list and what each one does.
+      FACESTREAM_GPU: ${{ vars.FACESTREAM_GPU || 'L40S' }}
+      FACESTREAM_REGION: ${{ vars.FACESTREAM_REGION }}
+      FACESTREAM_MIN_CONTAINERS: ${{ vars.FACESTREAM_MIN_CONTAINERS || '0' }}
+      FACESTREAM_MAX_CONTAINERS: ${{ vars.FACESTREAM_MAX_CONTAINERS }}
+      FACESTREAM_MAX_CONCURRENT_INPUTS: ${{ vars.FACESTREAM_MAX_CONCURRENT_INPUTS || '2' }}
+      FACESTREAM_TIMEOUT: ${{ vars.FACESTREAM_TIMEOUT || '3600' }}
+      FACESTREAM_TURN: ${{ vars.FACESTREAM_TURN || '0' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Check the Modal credentials are present
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "::error::MODAL_TOKEN_ID and MODAL_TOKEN_SECRET must be set as repository secrets."
+            echo "Create them at https://modal.com/settings/tokens"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Sync the Cloudflare TURN secret into Modal
+        if: env.FACESTREAM_TURN == '1'
+        env:
+          TURN_TOKEN_ID: ${{ secrets.TURN_TOKEN_ID }}
+          TURN_API_TOKEN: ${{ secrets.TURN_API_TOKEN }}
+        run: |
+          if [ -z "$TURN_TOKEN_ID" ] || [ -z "$TURN_API_TOKEN" ]; then
+            echo "::error::FACESTREAM_TURN is 1 but TURN_TOKEN_ID / TURN_API_TOKEN secrets are missing."
+            exit 1
+          fi
+          # The deploy names this secret, so it has to exist first.
+          uv run modal secret create facestream \
+            "TURN_TOKEN_ID=$TURN_TOKEN_ID" \
+            "TURN_API_TOKEN=$TURN_API_TOKEN" \
+            --force
+
+      - name: Deploy to Modal
+        run: uv run modal deploy -m facestream.main
+
+      - name: Check the deployment is answering
+        # Set the FACESTREAM_URL variable to your deployment's base URL to
+        # enable this, e.g. https://facestream.example.com
+        if: vars.FACESTREAM_URL != ''
+        run: |
+          for attempt in 1 2 3 4 5; do
+            status=$(curl -s -o /tmp/health.json -w "%{http_code}" \
+              --max-time 30 "${{ vars.FACESTREAM_URL }}/healthz" || true)
+            if [ "$status" = "200" ]; then
+              echo "Healthy:"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "Attempt $attempt: HTTP $status, retrying..."
+            sleep 10
+          done
+          echo "::error::${{ vars.FACESTREAM_URL }}/healthz did not return 200"
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### FaceStream deploy"
+            echo ""
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| GPU | \`${FACESTREAM_GPU}\` |"
+            echo "| Region | \`${FACESTREAM_REGION:-auto}\` |"
+            echo "| Warm containers | \`${FACESTREAM_MIN_CONTAINERS}\` |"
+            echo "| Max containers | \`${FACESTREAM_MAX_CONTAINERS:-unlimited}\` |"
+            echo "| Session timeout | \`${FACESTREAM_TIMEOUT}s\` |"
+            echo "| Cloudflare TURN | \`${FACESTREAM_TURN}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
